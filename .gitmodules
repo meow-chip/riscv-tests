@@ -1,4 +1,4 @@
 [submodule "env"]
 	path = env
-	url = git@git.tsinghua.edu.cn:meow/riscv-test-env
+	url = ../riscv-test-env.git
 	branch = meow
