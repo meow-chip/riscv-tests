@@ -45,9 +45,11 @@ vpath %.S $(src_dir)
 %.dump: %
 	$(RISCV_OBJDUMP) $< > $@
 
-%.hex: %
-	$(RISCV_PREFIX)objcopy -O binary $< $<.tmp
-	hexdump -ve '1/1 "%02x" "\n"' $<.tmp > $@
+%.bin: %
+	$(RISCV_PREFIX)objcopy -O binary $< $@
+
+%.hex: %.bin
+	hexdump -ve '1/1 "%02x" "\n"' $< > $@
 
 %.out: %
 	$(RISCV_SIM) --isa=rv64gc $< 2> $@
@@ -85,8 +87,8 @@ endef
 # $(eval $(call compile_template,rv32mi,-march=rv32g -mabi=ilp32))
 # ifeq ($(XLEN),64)
 $(eval $(call compile_template,rv64ui,-march=rv64g -mabi=lp64))
-#$(eval $(call compile_template,rv64uc,-march=rv64g -mabi=lp64))
-#$(eval $(call compile_template,rv64um,-march=rv64g -mabi=lp64))
+$(eval $(call compile_template,rv64uc,-march=rv64g -mabi=lp64))
+$(eval $(call compile_template,rv64um,-march=rv64g -mabi=lp64))
 #$(eval $(call compile_template,rv64ua,-march=rv64g -mabi=lp64))
 #$(eval $(call compile_template,rv64uf,-march=rv64g -mabi=lp64))
 #$(eval $(call compile_template,rv64ud,-march=rv64g -mabi=lp64))
@@ -95,18 +97,19 @@ $(eval $(call compile_template,rv64mi,-march=rv64g -mabi=lp64))
 # endif
 
 tests_dump = $(addsuffix .dump, $(tests))
+tests_bin = $(addsuffix .bin, $(tests))
 tests_hex = $(addsuffix .hex, $(tests))
 tests_out = $(addsuffix .out, $(spike_tests))
 tests32_out = $(addsuffix .out32, $(spike32_tests))
 
 run: $(tests_out) $(tests32_out)
 
-junk += $(tests) $(tests_dump) $(tests_hex) $(tests_out) $(tests32_out)
+junk += $(tests) $(tests_dump) $(tests_hex) $(tests_out) $(tests32_out) $(tests_bin)
 
 #------------------------------------------------------------
 # Default
 
-all: $(tests_hex)
+all: $(tests_bin)
 
 #------------------------------------------------------------
 # Clean up
