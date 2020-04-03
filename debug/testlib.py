@@ -54,7 +54,7 @@ class Spike:
     def __init__(self, target, halted=False, timeout=None, with_jtag_gdb=True,
             isa=None, progbufsize=None, dmi_rti=None, abstract_rti=None,
             support_hasel=True, support_abstract_csr=True,
-            support_haltgroups=True):
+            support_haltgroups=True, vlen=128, elen=64, slen=128):
         """Launch spike. Return tuple of its process and the port it's running
         on."""
         self.process = None
@@ -65,6 +65,9 @@ class Spike:
         self.support_abstract_csr = support_abstract_csr
         self.support_hasel = support_hasel
         self.support_haltgroups = support_haltgroups
+        self.vlen = vlen
+        self.elen = elen
+        self.slen = slen
 
         if target.harts:
             harts = target.harts
@@ -140,6 +143,10 @@ class Spike:
 
         if not self.support_haltgroups:
             cmd.append("--dm-no-halt-groups")
+
+        if 'V' in isa[2:]:
+            cmd.append("--varch=vlen:%d,elen:%d,slen:%d" % (self.vlen,
+                self.elen, self.slen))
 
         assert len(set(t.ram for t in harts)) == 1, \
                 "All spike harts must have the same RAM layout"
@@ -262,15 +269,21 @@ class Openocd:
         if debug:
             cmd.append("-d")
 
-        logfile = open(Openocd.logname, "w")
+        raw_logfile = open(Openocd.logname, "wb")
+        try:
+            spike_dasm = subprocess.Popen("spike-dasm", stdin=subprocess.PIPE,
+                    stdout=raw_logfile, stderr=raw_logfile)
+            logfile = spike_dasm.stdin
+        except FileNotFoundError:
+            logfile = raw_logfile
         if print_log_names:
             real_stdout.write("Temporary OpenOCD log: %s\n" % Openocd.logname)
         env_entries = ("REMOTE_BITBANG_HOST", "REMOTE_BITBANG_PORT",
                 "WORK_AREA")
         env_entries = [key for key in env_entries if key in os.environ]
-        logfile.write("+ %s%s\n" % (
+        logfile.write(("+ %s%s\n" % (
             "".join("%s=%s " % (key, os.environ[key]) for key in env_entries),
-            " ".join(map(pipes.quote, cmd))))
+            " ".join(map(pipes.quote, cmd)))).encode())
         logfile.flush()
 
         self.gdb_ports = []
@@ -372,38 +385,110 @@ class CouldNotFetch(Exception):
         self.regname = regname
         self.explanation = explanation
 
+class NoSymbol(Exception):
+    def __init__(self, symbol):
+        Exception.__init__(self)
+        self.symbol = symbol
+
 Thread = collections.namedtuple('Thread', ('id', 'description', 'target_id',
     'name', 'frame'))
 
-def parse_rhs(text):
-    text = text.strip()
-    if text.startswith("{") and text.endswith("}"):
-        inner = text[1:-1]
-        parsed = [parse_rhs(t) for t in inner.split(", ")]
-        if all([isinstance(p, dict) for p in parsed]):
-            dictionary = {}
-            for p in parsed:
-                for k, v in p.items():
-                    dictionary[k] = v
-            parsed = dictionary
-        return parsed
-    elif text.startswith('"') and text.endswith('"'):
-        return text[1:-1]
-    elif ' = ' in text:
-        lhs, rhs = text.split(' = ', 1)
-        return {lhs: parse_rhs(rhs)}
-    elif re.match(r"-?(\d+\.\d+(e-?\d+)?|inf)", text):
-        return float(text)
-    elif re.match(r"-?nan\(0x[a-f0-9]+\)", text):
-        return float("nan")
+class Repeat:
+    def __init__(self, count):
+        self.count = count
+
+def tokenize(text):
+    index = 0
+    while index < len(text):
+        for regex, fn in (
+                (r"[\s]+", lambda m: None),
+                (r"[,{}=]", lambda m: m.group(0)),
+                (r"0x[\da-fA-F]+", lambda m: int(m.group(0)[2:], 16)),
+                (r"-?\d*\.\d+(e[-+]\d+)?", lambda m: float(m.group(0))),
+                (r"-?\d+", lambda m: int(m.group(0))),
+                (r"-?nan\(0x[a-f0-9]+\)", lambda m: float("nan")),
+                (r"<repeats (\d+) times>", lambda m: Repeat(int(m.group(1)))),
+                (r"Could not fetch register \"(\w+)\"; (.*)$",
+                    lambda m: CouldNotFetch(m.group(1), m.group(2))),
+                (r"Cannot access memory at address (0x[0-9a-f]+)",
+                    lambda m: CannotAccess(int(m.group(1), 0))),
+                (r'No symbol "(\w+)" in current context.',
+                    lambda m: NoSymbol(m.group(1))),
+                (r'"([^"]*)"', lambda m: m.group(1)),
+                (r"[a-zA-Z][a-zA-Z\d]*", lambda m: m.group(0)),
+                ):
+            m = re.match(regex, text[index:])
+            if m:
+                index += len(m.group(0))
+                token = fn(m)
+                if not token is None:
+                    yield token
+                break
+        else:
+            raise Exception(repr(text[index:]))
+
+def parse_dict(tokens):
+    assert tokens[0] == "{"
+    tokens.pop(0)
+    result = {}
+    while True:
+        key = tokens.pop(0)
+        assert tokens.pop(0) == "="
+        value = parse_tokens(tokens)
+        result[key] = value
+        token = tokens.pop(0)
+        if token == "}":
+            return result
+        assert token == ","
+
+def parse_list(tokens):
+    assert tokens[0] == "{"
+    tokens.pop(0)
+    result = []
+    while True:
+        result.append(tokens.pop(0))
+        token = tokens.pop(0)
+        if isinstance(token, Repeat):
+            result += [result[-1]] * (token.count - 1)
+            token = tokens.pop(0)
+        if token == "}":
+            return result
+        assert token == ","
+
+def parse_dict_or_list(tokens):
+    assert tokens[0] == "{"
+    if tokens[2] == "=":
+        return parse_dict(tokens)
     else:
-        return int(text, 0)
+        return parse_list(tokens)
+
+def parse_tokens(tokens):
+    if isinstance(tokens[0], Exception):
+        raise tokens[0]
+    if isinstance(tokens[0], (float, int)):
+        return tokens.pop(0)
+    if tokens[0] == "{":
+        return parse_dict_or_list(tokens)
+    if isinstance(tokens[0], str):
+        return tokens.pop(0)
+    raise Exception("Unsupported tokens: %r" % tokens)
+
+def parse_rhs(text):
+    tokens = list(tokenize(text))
+    result = parse_tokens(tokens)
+    if tokens:
+        raise Exception("Unexpected input: %r" % tokens)
+    return result
 
 class Gdb:
     """A single gdb class which can interact with one or more gdb instances."""
 
     # pylint: disable=too-many-public-methods
     # pylint: disable=too-many-instance-attributes
+
+    reset_delays = (127, 181, 17, 13, 83, 151, 31, 67, 131, 167, 23, 41, 61,
+            11, 149, 107, 163, 73, 47, 43, 173, 7, 109, 101, 103, 191, 2, 139,
+            97, 193, 157, 3, 29, 79, 113, 5, 89, 19, 37, 71, 179, 59, 137, 53)
 
     def __init__(self, ports,
             cmd="riscv64-unknown-elf-gdb",
@@ -415,6 +500,7 @@ class Gdb:
         self.timeout = timeout
         self.binary = binary
 
+        self.reset_delay_index = 0
         self.stack = []
         self.harts = {}
 
@@ -496,10 +582,17 @@ class Gdb:
         """Wait for prompt."""
         self.active_child.expect(r"\(gdb\)")
 
-    def command(self, command, ops=1):
+    def command(self, command, ops=1, reset_delays=0):
         """ops is the estimated number of operations gdb will have to perform
         to perform this command. It is used to compute a timeout based on
         self.timeout."""
+        if not reset_delays is None:
+            if reset_delays == 0:
+                reset_delays = self.reset_delays[self.reset_delay_index]
+                self.reset_delay_index = (self.reset_delay_index + 1) % \
+                        len(self.reset_delays)
+            self.command("monitor riscv reset_delays %d" % reset_delays,
+                    reset_delays=None)
         timeout = ops * self.timeout
         self.active_child.sendline(command)
         self.active_child.expect("\n", timeout=timeout)
@@ -580,12 +673,6 @@ class Gdb:
 
     def p(self, obj, fmt="/x", ops=1):
         output = self.command("p%s %s" % (fmt, obj), ops=ops).splitlines()[-1]
-        m = re.search("Cannot access memory at address (0x[0-9a-f]+)", output)
-        if m:
-            raise CannotAccess(int(m.group(1), 0))
-        m = re.search(r"Could not fetch register \"(\w+)\"; (.*)$", output)
-        if m:
-            raise CouldNotFetch(m.group(1), m.group(2))
         rhs = output.split('=', 1)[-1]
         return parse_rhs(rhs)
 
@@ -604,7 +691,7 @@ class Gdb:
         output = self.command("info registers %s" % group, ops=5)
         result = {}
         for line in output.splitlines():
-            m = re.match(r"(\w+)\s+({.*})\s+(\(.*\))", line)
+            m = re.match(r"(\w+)\s+({.*})(?:\s+(\(.*\)))?", line)
             if m:
                 parts = m.groups()
             else:
@@ -689,6 +776,18 @@ class PrivateState:
         self.gdb.pop_state()
 
 def run_all_tests(module, target, parsed):
+    todo = []
+    for name in dir(module):
+        definition = getattr(module, name)
+        if isinstance(definition, type) and hasattr(definition, 'test') and \
+                (not parsed.test or any(test in name for test in parsed.test)):
+            todo.append((name, definition, None))
+
+    if parsed.list_tests:
+        for name, definition, hart in todo:
+            print(name)
+        return 0
+
     try:
         os.makedirs(parsed.logs)
     except OSError:
@@ -701,7 +800,6 @@ def run_all_tests(module, target, parsed):
     global gdb_cmd  # pylint: disable=global-statement
     gdb_cmd = parsed.gdb
 
-    todo = []
     examine_added = False
     for hart in target.harts:
         if parsed.misaval:
@@ -710,14 +808,8 @@ def run_all_tests(module, target, parsed):
         elif hart.misa:
             print("Using $misa from hart definition: 0x%x" % hart.misa)
         elif not examine_added:
-            todo.append(("ExamineTarget", ExamineTarget, None))
+            todo.insert(0, ("ExamineTarget", ExamineTarget, None))
             examine_added = True
-
-    for name in dir(module):
-        definition = getattr(module, name)
-        if isinstance(definition, type) and hasattr(definition, 'test') and \
-                (not parsed.test or any(test in name for test in parsed.test)):
-            todo.append((name, definition, None))
 
     results, count = run_tests(parsed, target, todo)
 
@@ -786,6 +878,8 @@ def add_test_run_options(parser):
     parser.add_argument("--print-log-names", "--pln", action="store_true",
             help="Print names of temporary log files as soon as they are "
             "created.")
+    parser.add_argument("--list-tests", action="store_true",
+            help="Print out a list of tests, and exit immediately.")
     parser.add_argument("test", nargs='*',
             help="Run only tests that are named here.")
     parser.add_argument("--gdb",
@@ -876,7 +970,8 @@ class BaseTest:
 
         sys.stdout.flush()
 
-        if not self.early_applicable():
+        if self.__class__.__name__ in self.target.skip_tests or \
+                not self.early_applicable():
             return "not_applicable"
 
         self.start = time.time()
@@ -927,6 +1022,12 @@ class GdbTest(BaseTest):
         BaseTest.__init__(self, target, hart=hart)
         self.gdb = None
 
+    def write_nop_program(self, count):
+        for i in range(count):
+            # 0x13 is nop
+            self.gdb.command("p *((int*) 0x%x)=0x13" % (self.hart.ram + i * 4))
+        self.gdb.p("$pc=0x%x" % self.hart.ram)
+
     def classSetup(self):
         BaseTest.classSetup(self)
 
@@ -955,11 +1056,11 @@ class GdbTest(BaseTest):
         if not self.gdb:
             return
         self.gdb.interrupt()
-        self.gdb.command("info breakpoints")
-        self.gdb.command("disassemble", ops=20)
-        self.gdb.command("info registers all", ops=20)
-        self.gdb.command("flush regs")
-        self.gdb.command("info threads", ops=20)
+        self.gdb.command("info breakpoints", reset_delays=None)
+        self.gdb.command("disassemble", ops=20, reset_delays=None)
+        self.gdb.command("info registers all", ops=20, reset_delays=None)
+        self.gdb.command("flush regs", reset_delays=None)
+        self.gdb.command("info threads", ops=20, reset_delays=None)
 
     def classTeardown(self):
         del self.gdb
@@ -974,6 +1075,17 @@ class GdbTest(BaseTest):
                 self.gdb.p("$pc=loop_forever")
 
         self.gdb.select_hart(self.hart)
+
+    def disable_pmp(self):
+        # Disable physical memory protection by allowing U mode access to all
+        # memory.
+        try:
+            self.gdb.p("$pmpcfg0=0xf")  # TOR, R, W, X
+            self.gdb.p("$pmpaddr0=0x%x" %
+                    ((self.hart.ram + self.hart.ram_size) >> 2))
+        except CouldNotFetch:
+            # PMP registers are optional
+            pass
 
 class GdbSingleHartTest(GdbTest):
     def classSetup(self):
