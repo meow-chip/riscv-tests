@@ -46,7 +46,7 @@ vpath %.S $(src_dir)
 	$(RISCV_OBJDUMP) $< > $@
 
 %.bin: %
-	$(RISCV_PREFIX)objcopy -O binary $< $@
+	$(RISCV_PREFIX)objcopy -O binary -j .text -j .text.startup -j .text.init -j .data $< $@
 
 %.hex: %.bin
 	hexdump -ve '1/1 "%02x" "\n"' $< > $@
