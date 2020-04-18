@@ -34,7 +34,7 @@ default: all
 RISCV_PREFIX ?= riscv$(XLEN)-unknown-elf-
 RISCV_GCC ?= $(RISCV_PREFIX)gcc
 RISCV_GCC_OPTS ?= -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles -Wl,--build-id=none
-RISCV_OBJDUMP ?= $(RISCV_PREFIX)objdump --disassemble-all --disassemble-zeroes --section=.text --section=.text.startup --section=.text.init --section=.data
+RISCV_OBJDUMP ?= $(RISCV_PREFIX)objdump --disassemble-all --disassemble-zeroes --section=.text --section=.text.startup --section=.text.init --section=.data --section=.sdata
 RISCV_SIM ?= spike
 
 vpath %.S $(src_dir)
@@ -46,7 +46,7 @@ vpath %.S $(src_dir)
 	$(RISCV_OBJDUMP) $< > $@
 
 %.bin: %
-	$(RISCV_PREFIX)objcopy -O binary -j .text -j .text.startup -j .text.init -j .data $< $@
+	$(RISCV_PREFIX)objcopy -O binary -j .text -j .text.startup -j .text.init -j .data -j .sdata $< $@
 
 %.hex: %.bin
 	hexdump -ve '1/1 "%02x" "\n"' $< > $@
@@ -63,9 +63,9 @@ $$($(1)_p_tests): $(1)-p-%: $(1)/%.S
 	$$(RISCV_GCC) $(2) $$(RISCV_GCC_OPTS) -I$(src_dir)/../env/p -I$(src_dir)/macros/scalar -T$(src_dir)/../env/p/link.ld $$< -o $$@
 $(1)_tests += $$($(1)_p_tests)
 
-#$$($(1)_v_tests): $(1)-v-%: $(1)/%.S
-#	$$(RISCV_GCC) $(2) $$(RISCV_GCC_OPTS) -DENTROPY=0x$$(shell echo \$$@ | md5sum | cut -c 1-7) -std=gnu99 -O2 -I$(src_dir)/../env/v -I$(src_dir)/macros/scalar -T$(src_dir)/../env/v/link.ld $(src_dir)/../env/v/entry.S $(src_dir)/../env/v/*.c $$< -o $$@
-#$(1)_tests += $$($(1)_v_tests)
+$$($(1)_v_tests): $(1)-v-%: $(1)/%.S
+	$$(RISCV_GCC) $(2) $$(RISCV_GCC_OPTS) -mcmodel=medany -DENTROPY=0x$$(shell echo \$$@ | md5sum | cut -c 1-7) -std=gnu99 -O2 -I$(src_dir)/../env/v -I$(src_dir)/macros/scalar -T$(src_dir)/../env/v/link.ld $(src_dir)/../env/v/entry.S $(src_dir)/../env/v/*.c $$< -o $$@
+$(1)_tests += $$($(1)_v_tests)
 
 $(1)_tests_dump = $$(addsuffix .dump, $$($(1)_tests))
 
@@ -86,14 +86,14 @@ endef
 # $(eval $(call compile_template,rv32si,-march=rv32g -mabi=ilp32))
 # $(eval $(call compile_template,rv32mi,-march=rv32g -mabi=ilp32))
 # ifeq ($(XLEN),64)
-$(eval $(call compile_template,rv64ui,-march=rv64g -mabi=lp64))
-$(eval $(call compile_template,rv64uc,-march=rv64g -mabi=lp64))
-$(eval $(call compile_template,rv64um,-march=rv64g -mabi=lp64))
-#$(eval $(call compile_template,rv64ua,-march=rv64g -mabi=lp64))
-#$(eval $(call compile_template,rv64uf,-march=rv64g -mabi=lp64))
-#$(eval $(call compile_template,rv64ud,-march=rv64g -mabi=lp64))
-$(eval $(call compile_template,rv64si,-march=rv64g -mabi=lp64))
-$(eval $(call compile_template,rv64mi,-march=rv64g -mabi=lp64))
+$(eval $(call compile_template,rv64ui,-march=rv64g -mabi=lp64d))
+$(eval $(call compile_template,rv64uc,-march=rv64g -mabi=lp64d))
+$(eval $(call compile_template,rv64um,-march=rv64g -mabi=lp64d))
+#$(eval $(call compile_template,rv64ua,-march=rv64g -mabi=lp64d))
+#$(eval $(call compile_template,rv64uf,-march=rv64g -mabi=lp64d))
+#$(eval $(call compile_template,rv64ud,-march=rv64g -mabi=lp64d))
+$(eval $(call compile_template,rv64si,-march=rv64g -mabi=lp64d))
+$(eval $(call compile_template,rv64mi,-march=rv64g -mabi=lp64d))
 # endif
 
 tests_dump = $(addsuffix .dump, $(tests))
