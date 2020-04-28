@@ -89,7 +89,7 @@ endef
 $(eval $(call compile_template,rv64ui,-march=rv64gc -mabi=lp64d))
 $(eval $(call compile_template,rv64uc,-march=rv64gc -mabi=lp64d))
 $(eval $(call compile_template,rv64um,-march=rv64gc -mabi=lp64d))
-#$(eval $(call compile_template,rv64ua,-march=rv64gc -mabi=lp64d))
+$(eval $(call compile_template,rv64ua,-march=rv64gc -mabi=lp64d))
 #$(eval $(call compile_template,rv64uf,-march=rv64gc -mabi=lp64d))
 #$(eval $(call compile_template,rv64ud,-march=rv64gc -mabi=lp64d))
 $(eval $(call compile_template,rv64si,-march=rv64gc -mabi=lp64d))
